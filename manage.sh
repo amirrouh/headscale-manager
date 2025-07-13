@@ -1814,7 +1814,7 @@ client_management_menu() {
                 local auth_key=$(ask "Enter pre-auth key:")
                 
                 if [[ -n "$server_url" && -n "$auth_key" ]]; then
-                    sudo tailscale up --login-server "$server_url" --authkey "$auth_key"
+                    sudo tailscale up --login-server "$server_url" --authkey "$auth_key" --force-reauth
                     say "Connected to Headscale server"
                 fi
                 pause
