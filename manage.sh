@@ -14,7 +14,7 @@ HEADSCALE_CONFIG_DIR="/etc/headscale"
 HEADSCALE_DATA_DIR="/var/lib/headscale"
 HEADSCALE_BINARY="/usr/local/bin/headscale"
 TAILSCALE_CONFIG_DIR="/etc/tailscale"
-DEFAULT_HEADSCALE_PORT=8585
+DEFAULT_HEADSCALE_PORT=8586
 DEFAULT_METRICS_PORT=9595
 HEADSCALE_SERVICE="headscale"
 
@@ -1068,16 +1068,21 @@ guided_preauth_key_creation() {
         echo
         
         if [[ -n "$preauth_key" ]]; then
-            show_info "🚀 Ready-to-use client connection command:"
+            show_info "🚀 Ready-to-use client connection commands:"
             echo
-            echo -e "\033[1;42m\033[1;37m Copy and paste this command on your client device: \033[0m"
+            echo -e "\033[1;42m\033[1;37m COPY & PASTE CONNECTION LINK (Recommended): \033[0m"
+            echo
+            echo -e "\033[1;36msudo tailscale up --login-server $server_url --authkey $preauth_key --force-reauth\033[0m"
+            echo
+            echo -e "\033[1;44m\033[1;37m ALTERNATIVE - First time connection: \033[0m"
             echo
             echo -e "\033[1;36msudo tailscale up --login-server $server_url --authkey $preauth_key\033[0m"
             echo
             echo -e "\033[1m📝 Steps to connect a device:\033[0m"
             echo "   1️⃣ Install Tailscale: https://tailscale.com/download"
-            echo "   2️⃣ Run the command above on the client device"
+            echo "   2️⃣ Copy and paste the FIRST command above on the client device"
             echo "   3️⃣ Your device will automatically join the network!"
+            echo "   4️⃣ Use --force-reauth if reconnecting or troubleshooting connection issues"
         else
             show_info "🚀 To connect a client device to your Headscale network:"
             echo
@@ -1085,7 +1090,7 @@ guided_preauth_key_creation() {
             echo "   Visit: https://tailscale.com/download"
             echo
             echo -e "\033[1m2. Connect to your Headscale server\033[0m"
-            echo -e "   \033[36msudo tailscale up --login-server $server_url --authkey <the-key-above>\033[0m"
+            echo -e "   \033[36msudo tailscale up --login-server $server_url --authkey <the-key-above> --force-reauth\033[0m"
             echo
             echo -e "\033[1m3. Replace <the-key-above> with the actual key shown above\033[0m"
         fi
@@ -1275,6 +1280,42 @@ guided_user_deletion() {
     fi
 }
 
+generate_connection_link() {
+    clear
+    draw_header "Generate Connection Link from Existing Key"
+    
+    show_info "Enter an existing pre-auth key to generate a ready-to-use connection link."
+    echo
+    
+    local preauth_key server_url
+    preauth_key=$(ask "Enter pre-auth key")
+    
+    if [[ -z "$preauth_key" ]]; then
+        show_error "Pre-auth key cannot be empty"
+        return 1
+    fi
+    
+    server_url=$(get_headscale_server_url)
+    
+    echo
+    show_info "🚀 Ready-to-use client connection commands:"
+    echo
+    echo -e "\033[1;42m\033[1;37m COPY & PASTE CONNECTION LINK (Recommended): \033[0m"
+    echo
+    echo -e "\033[1;36msudo tailscale up --login-server $server_url --authkey $preauth_key --force-reauth\033[0m"
+    echo
+    echo -e "\033[1;44m\033[1;37m ALTERNATIVE - First time connection: \033[0m"
+    echo
+    echo -e "\033[1;36msudo tailscale up --login-server $server_url --authkey $preauth_key\033[0m"
+    echo
+    echo -e "\033[1m📝 Instructions:\033[0m"
+    echo "   1️⃣ Install Tailscale on client: https://tailscale.com/download"
+    echo "   2️⃣ Copy and paste the FIRST command above on the client device"
+    echo "   3️⃣ Use --force-reauth to reconnect or fix connection issues"
+    echo
+    show_info "🌐 Your Headscale server URL: $server_url"
+}
+
 guided_preauth_key_listing() {
     clear
     draw_header "List Pre-Authentication Keys"
@@ -1284,7 +1325,8 @@ guided_preauth_key_listing() {
     
     draw_menu_item "1" "List keys for a specific user"
     draw_menu_item "2" "List keys for all users"
-    draw_menu_item "3" "Back to server management"
+    draw_menu_item "3" "Generate connection link from existing key"
+    draw_menu_item "4" "Back to server management"
     echo
     
     local choice
@@ -1302,6 +1344,9 @@ guided_preauth_key_listing() {
             list_keys_for_all_users
             ;;
         3)
+            generate_connection_link
+            ;;
+        4)
             return
             ;;
         *)
@@ -1661,10 +1706,11 @@ server_management_menu() {
         draw_menu_item "6" "Delete node"
         draw_menu_item "7" "Create pre-auth key (guided)"
         draw_menu_item "8" "List pre-auth keys"
-        draw_menu_item "9" "Restart server"
-        draw_menu_item "10" "Update server configuration"
-        draw_menu_item "11" "Backup server data"
-        draw_menu_item "12" "Restore server data"
+        draw_menu_item "9" "Generate connection link"
+        draw_menu_item "10" "Restart server"
+        draw_menu_item "11" "Update server configuration"
+        draw_menu_item "12" "Backup server data"
+        draw_menu_item "13" "Restore server data"
         echo
         draw_menu_item "B" "Back to main menu"
         echo
@@ -1732,10 +1778,14 @@ server_management_menu() {
                 pause
                 ;;
             9)
-                manage_service restart "$HEADSCALE_SERVICE"
+                generate_connection_link
                 pause
                 ;;
             10)
+                manage_service restart "$HEADSCALE_SERVICE"
+                pause
+                ;;
+            11)
                 if cmd nano; then
                     sudo nano "$HEADSCALE_CONFIG_DIR/config.yaml"
                 elif cmd vim; then
@@ -1745,7 +1795,7 @@ server_management_menu() {
                 fi
                 pause
                 ;;
-            11)
+            12)
                 local backup_dir="$HOME/headscale-backup-$(date +%Y%m%d-%H%M%S)"
                 mkdir -p "$backup_dir"
                 sudo cp -r "$HEADSCALE_CONFIG_DIR" "$backup_dir/config"
@@ -1754,7 +1804,7 @@ server_management_menu() {
                 say "Backup created at: $backup_dir"
                 pause
                 ;;
-            12)
+            13)
                 local backup_dir=$(ask "Enter backup directory path:")
                 if [[ -d "$backup_dir/config" && -d "$backup_dir/data" ]]; then
                     if ask_yn "This will overwrite current configuration. Continue?"; then
