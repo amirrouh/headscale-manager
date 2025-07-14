@@ -738,14 +738,58 @@ setup_headscale_server() {
     echo "  Public IP: $public_ip"
     echo "  Port: $port"
     
+    # Determine which IP to use for server URL
+    local server_ip
+    echo
+    show_info "Choose the IP address for client connections:"
+    echo "  1. Use public IP ($public_ip) - for internet access"
+    echo "  2. Use primary/local IP ($primary_ip) - for local network only"
+    echo "  3. Enter custom IP or domain name"
+    echo
+    
+    local ip_choice
+    if [[ -t 0 ]]; then
+        read -rp "🔹 Select option (1/2/3): " ip_choice </dev/tty
+    else
+        read -rp "🔹 Select option (1/2/3): " ip_choice
+    fi
+    
+    case "$ip_choice" in
+        1)
+            if [[ "$public_ip" != "unknown" ]]; then
+                server_ip="$public_ip"
+                show_success "Using public IP: $server_ip"
+            else
+                warn "Public IP not available, falling back to primary IP"
+                server_ip="$primary_ip"
+            fi
+            ;;
+        2)
+            server_ip="$primary_ip"
+            show_success "Using primary IP: $server_ip"
+            ;;
+        3)
+            server_ip=$(ask "Enter IP address or domain name")
+            show_success "Using custom address: $server_ip"
+            ;;
+        *)
+            warn "Invalid choice, using primary IP"
+            server_ip="$primary_ip"
+            ;;
+    esac
+    
+    # Ask about HTTPS
     local server_url
+    echo
     if ask_yn "Use HTTPS with self-signed certificate?"; then
-        server_url="https://$primary_ip:$port"
+        server_url="https://$server_ip:$port"
         USE_TLS=true
     else
-        server_url="http://$primary_ip:$port"
+        server_url="http://$server_ip:$port"
         USE_TLS=false
     fi
+    
+    show_success "Server URL will be: $server_url"
     
     # Install Headscale
     if [[ ! -x "$HEADSCALE_BINARY" ]]; then
@@ -789,12 +833,28 @@ setup_headscale_server() {
     sleep 3
     
     # Verify installation
-    if test_connectivity "$primary_ip" "$port"; then
-        say "Headscale server is running on $server_url"
-        info "Next steps:"
-        echo "  1. Create a user: headscale users create <username>"
-        echo "  2. Create a pre-auth key: headscale preauthkeys create --user <username> --reusable --ephemeral=false"
-        echo "  3. Use the key on client machines to connect"
+    if test_connectivity "$server_ip" "$port" || test_connectivity "$primary_ip" "$port"; then
+        echo
+        show_success "🎉 Headscale server is running successfully!"
+        echo
+        show_info "📋 Server Information:"
+        echo "   🌐 Server URL: $server_url"
+        echo "   🔧 Config: $HEADSCALE_CONFIG_DIR/config.yaml"
+        echo "   📁 Data: $HEADSCALE_DATA_DIR"
+        echo "   📄 Logs: Use option 6 → 1 from main menu"
+        echo
+        show_info "🚀 Next Steps (Use the Server Management menu):"
+        echo "   1️⃣ Create a user (option 6 → 3)"
+        echo "   2️⃣ Create a pre-auth key (option 6 → 7)"
+        echo "   3️⃣ Use the key to connect client devices"
+        echo
+        show_info "💡 Quick Commands:"
+        echo "   • Create user: ./manage.sh # then go to Server Management → Create user"
+        echo "   • Server management: Choose option 6 from main menu"
+        echo
+        if [[ "$USE_TLS" == true ]]; then
+            warn "⚠️  Using self-signed certificate - clients may need to accept security warnings"
+        fi
     else
         die "Failed to start Headscale server or port is not accessible"
     fi
@@ -929,9 +989,15 @@ get_headscale_server_url() {
             ip=$(echo "$listen_addr" | cut -d: -f1)
             port=$(echo "$listen_addr" | cut -d: -f2)
             
-            # If listening on 0.0.0.0, use the primary IP
+            # If listening on 0.0.0.0, we need to get the actual external IP
             if [[ "$ip" == "0.0.0.0" ]]; then
-                ip=$(get_primary_ip)
+                # Try to get public IP first, fallback to primary IP
+                local public_ip=$(get_public_ip)
+                if [[ "$public_ip" != "unknown" ]]; then
+                    ip="$public_ip"
+                else
+                    ip=$(get_primary_ip)
+                fi
             fi
             
             # Determine if it should be http or https
@@ -945,7 +1011,14 @@ get_headscale_server_url() {
         fi
     fi
     
-    # Final fallback
+    # Final fallback - try to detect from running service
+    if pgrep headscale &>/dev/null; then
+        local primary_ip=$(get_primary_ip)
+        local port=$(find_free_port $DEFAULT_HEADSCALE_PORT)
+        echo "http://${primary_ip}:${port}"
+        return 0
+    fi
+    
     echo "http://your-headscale-server:8080"
 }
 guided_preauth_key_creation() {
@@ -1046,19 +1119,26 @@ guided_preauth_key_creation() {
     if key_output=$(eval "$create_cmd" 2>&1); then
         echo "$key_output"  # Show the original output
         
-        # Extract the actual preauth key from the output
+        # Extract the actual preauth key from the output with better patterns
         local preauth_key
-        # Try different patterns to extract the key
+        # Try different patterns to extract the key - improved extraction
         preauth_key=$(echo "$key_output" | grep -oE '[a-f0-9]{64}' | head -1)  # 64-char hex
         if [[ -z "$preauth_key" ]]; then
             preauth_key=$(echo "$key_output" | grep -oE 'authkey-[a-zA-Z0-9]+' | head -1)  # authkey- format
         fi
         if [[ -z "$preauth_key" ]]; then
+            preauth_key=$(echo "$key_output" | grep -oE 'nodekey:[a-zA-Z0-9]+' | cut -d: -f2 | head -1)  # nodekey: format
+        fi
+        if [[ -z "$preauth_key" ]]; then
             preauth_key=$(echo "$key_output" | grep -oE '[a-zA-Z0-9]{40,}' | head -1)  # long alphanumeric
         fi
         if [[ -z "$preauth_key" ]]; then
-            # Fallback: try to get the last non-empty line that looks like a key
-            preauth_key=$(echo "$key_output" | tail -n 5 | grep -v '^$' | grep -E '[a-zA-Z0-9]{20,}' | head -1 | awk '{print $NF}')
+            # Look for key pattern in the last few lines
+            preauth_key=$(echo "$key_output" | tail -n 10 | grep -oE '[a-f0-9]{32,}' | head -1)
+        fi
+        if [[ -z "$preauth_key" ]]; then
+            # Final fallback: get the last substantial line that contains key-like content
+            preauth_key=$(echo "$key_output" | grep -v '^[[:space:]]*$' | grep -v 'Key\|User\|Reusable\|Ephemeral\|Created\|Expiration' | tail -1 | sed 's/^[[:space:]]*//' | awk '{print $1}')
         fi
         echo
         
@@ -1068,21 +1148,37 @@ guided_preauth_key_creation() {
         echo
         
         if [[ -n "$preauth_key" ]]; then
+            show_success "✅ Pre-authentication key created successfully!"
+            echo
+            echo "═══════════════════════════════════════════════════════════════════════════════"
+            echo -e "\033[1;32m🔑 YOUR PRE-AUTH KEY: $preauth_key\033[0m"
+            echo "═══════════════════════════════════════════════════════════════════════════════"
+            echo
             show_info "🚀 Ready-to-use client connection commands:"
             echo
-            echo -e "\033[1;42m\033[1;37m COPY & PASTE CONNECTION LINK (Recommended): \033[0m"
+            echo -e "\033[1;42m\033[1;37m FOR RECONNECTION OR TROUBLESHOOTING (RECOMMENDED): \033[0m"
             echo
             echo -e "\033[1;36msudo tailscale up --login-server $server_url --authkey $preauth_key --force-reauth\033[0m"
             echo
-            echo -e "\033[1;44m\033[1;37m ALTERNATIVE - First time connection: \033[0m"
+            echo -e "\033[1;44m\033[1;37m FOR FIRST-TIME CONNECTION: \033[0m"
             echo
             echo -e "\033[1;36msudo tailscale up --login-server $server_url --authkey $preauth_key\033[0m"
             echo
-            echo -e "\033[1m📝 Steps to connect a device:\033[0m"
-            echo "   1️⃣ Install Tailscale: https://tailscale.com/download"
-            echo "   2️⃣ Copy and paste the FIRST command above on the client device"
-            echo "   3️⃣ Your device will automatically join the network!"
-            echo "   4️⃣ Use --force-reauth if reconnecting or troubleshooting connection issues"
+            echo "═══════════════════════════════════════════════════════════════════════════════"
+            echo -e "\033[1m📝 HOW TO CONNECT A CLIENT DEVICE:\033[0m"
+            echo "═══════════════════════════════════════════════════════════════════════════════"
+            echo "   1️⃣ Install Tailscale on the client device"
+            echo "      🌐 Download from: https://tailscale.com/download"
+            echo
+            echo "   2️⃣ Open terminal/command prompt on the client device"
+            echo
+            echo "   3️⃣ Copy and paste the FIRST command above (with --force-reauth)"
+            echo "      💡 This works for both new connections and reconnections"
+            echo
+            echo "   4️⃣ Your device will automatically join the network!"
+            echo "      ✅ If successful, you'll see the device in the nodes list"
+            echo
+            echo "   🔧 If connection fails, use the troubleshooting option in Client Management"
         else
             show_info "🚀 To connect a client device to your Headscale network:"
             echo
@@ -1630,6 +1726,76 @@ stop_tailscaled() {
 ###############################################################################
 # DIAGNOSTICS AND TROUBLESHOOTING                                             #
 ###############################################################################
+
+# Function to validate connection parameters
+validate_connection() {
+    local server_url="$1"
+    local auth_key="$2"
+    local issues=()
+    
+    show_info "Validating connection parameters..."
+    echo
+    
+    # Validate server URL format
+    if [[ ! "$server_url" =~ ^https?://[^[:space:]]+$ ]]; then
+        issues+=("❌ Invalid server URL format. Should be http:// or https://")
+    else
+        show_success "✅ Server URL format is valid"
+    fi
+    
+    # Extract host and port from URL
+    local protocol=$(echo "$server_url" | cut -d: -f1)
+    local host_port=$(echo "$server_url" | sed 's|^[^/]*//||' | cut -d/ -f1)
+    local host=$(echo "$host_port" | cut -d: -f1)
+    local port=$(echo "$host_port" | cut -d: -f2)
+    
+    # If no port specified, use default based on protocol
+    if [[ "$host" == "$port" ]]; then
+        if [[ "$protocol" == "https" ]]; then
+            port="443"
+        else
+            port="80"
+        fi
+    fi
+    
+    # Test network connectivity to server
+    show_info "Testing connectivity to $host:$port..."
+    if test_connectivity "$host" "$port"; then
+        show_success "✅ Server is reachable"
+    else
+        issues+=("❌ Cannot reach server at $host:$port")
+    fi
+    
+    # Validate auth key format
+    if [[ ${#auth_key} -lt 20 ]]; then
+        issues+=("❌ Auth key seems too short (less than 20 characters)")
+    elif [[ ! "$auth_key" =~ ^[a-zA-Z0-9]+$ ]] && [[ ! "$auth_key" =~ ^[a-f0-9]+$ ]]; then
+        issues+=("⚠️  Auth key format may be invalid (should be alphanumeric)")
+    else
+        show_success "✅ Auth key format appears valid"
+    fi
+    
+    # Check if tailscaled is running
+    if tailscaled_running; then
+        show_success "✅ Tailscale daemon is running"
+    else
+        issues+=("❌ Tailscale daemon is not running")
+    fi
+    
+    # Report results
+    echo
+    if [[ ${#issues[@]} -eq 0 ]]; then
+        show_success "🎉 All validation checks passed!"
+        return 0
+    else
+        show_error "⚠️  Found ${#issues[@]} issue(s):"
+        for issue in "${issues[@]}"; do
+            echo "   $issue"
+        done
+        return 1
+    fi
+}
+
 run_diagnostics() {
     echo "=== System Diagnostics ==="
     echo "OS: $OS_TYPE $DISTRO $DISTRO_VERSION ($ARCH)"
@@ -1845,6 +2011,7 @@ client_management_menu() {
         draw_menu_item "8" "Enable/disable subnet routes"
         draw_menu_item "9" "Logout from network"
         draw_menu_item "10" "View connection logs"
+        draw_menu_item "11" "Connection troubleshooting"
         echo
         draw_menu_item "B" "Back to main menu"
         echo
@@ -1857,15 +2024,78 @@ client_management_menu() {
         
         case "$choice" in
             1)
-                install_tailscale
-                start_tailscaled
+                clear
+                draw_header "Connect to Headscale Server"
                 
-                local server_url=$(ask "Enter Headscale server URL (e.g., https://headscale.example.com):")
-                local auth_key=$(ask "Enter pre-auth key:")
+                # Install and start tailscale if needed
+                if ! cmd tailscale; then
+                    show_info "Installing Tailscale client..."
+                    install_tailscale
+                fi
+                
+                if ! tailscaled_running; then
+                    show_info "Starting Tailscale daemon..."
+                    start_tailscaled
+                fi
+                
+                echo
+                show_info "Connection Setup:"
+                echo "   1. Enter your Headscale server URL"
+                echo "   2. Enter your pre-authentication key"
+                echo "   3. The connection will be established with force-reauth for reliability"
+                echo
+                
+                local server_url=$(ask "Enter Headscale server URL (e.g., https://headscale.example.com)")
+                local auth_key=$(ask "Enter pre-auth key")
                 
                 if [[ -n "$server_url" && -n "$auth_key" ]]; then
-                    sudo tailscale up --login-server "$server_url" --authkey "$auth_key" --force-reauth
-                    say "Connected to Headscale server"
+                    echo
+                    # Validate connection parameters first
+                    if validate_connection "$server_url" "$auth_key"; then
+                        echo
+                        show_info "Connecting to Headscale server..."
+                        echo "Running: sudo tailscale up --login-server \"$server_url\" --authkey \"$auth_key\" --force-reauth"
+                        echo
+                        
+                        # Try connection with better error handling
+                        if sudo tailscale up --login-server "$server_url" --authkey "$auth_key" --force-reauth; then
+                            echo
+                            show_success "Successfully connected to Headscale server!"
+                            echo
+                            show_info "Connection status:"
+                            tailscale status
+                        else
+                            echo
+                            show_error "Failed to connect to Headscale server"
+                            echo
+                            show_info "Troubleshooting tips:"
+                            echo "   • Verify the server URL is correct and accessible"
+                            echo "   • Check if the pre-auth key is valid and not expired"
+                            echo "   • Ensure firewall allows connections to the server"
+                            echo "   • Try connecting without --force-reauth if this is first connection"
+                            echo
+                            show_info "Alternative command to try:"
+                            echo "   sudo tailscale up --login-server \"$server_url\" --authkey \"$auth_key\""
+                            
+                            # Offer to try without force-reauth
+                            echo
+                            if ask_yn "Try connecting without --force-reauth flag"; then
+                                echo
+                                show_info "Attempting connection without --force-reauth..."
+                                if sudo tailscale up --login-server "$server_url" --authkey "$auth_key"; then
+                                    show_success "Successfully connected!"
+                                    tailscale status
+                                else
+                                    show_error "Connection failed again. Please check your server and key."
+                                fi
+                            fi
+                        fi
+                    else
+                        echo
+                        show_error "Connection validation failed. Please fix the issues above before attempting to connect."
+                    fi
+                else
+                    show_error "Server URL and auth key are required"
                 fi
                 pause
                 ;;
@@ -1932,6 +2162,72 @@ client_management_menu() {
                 else
                     manage_service logs tailscaled
                 fi
+                pause
+                ;;
+            11)
+                clear
+                draw_header "Connection Troubleshooting"
+                
+                show_info "This will help diagnose connection issues with your Headscale server."
+                echo
+                
+                # Get connection details
+                local server_url=$(ask "Enter Headscale server URL")
+                local auth_key=$(ask "Enter pre-auth key (optional, for validation)")
+                
+                echo
+                # Run validation if both provided
+                if [[ -n "$server_url" && -n "$auth_key" ]]; then
+                    validate_connection "$server_url" "$auth_key"
+                elif [[ -n "$server_url" ]]; then
+                    # Just test server connectivity
+                    local protocol=$(echo "$server_url" | cut -d: -f1)
+                    local host_port=$(echo "$server_url" | sed 's|^[^/]*//||' | cut -d/ -f1)
+                    local host=$(echo "$host_port" | cut -d: -f1)
+                    local port=$(echo "$host_port" | cut -d: -f2)
+                    
+                    if [[ "$host" == "$port" ]]; then
+                        if [[ "$protocol" == "https" ]]; then
+                            port="443"
+                        else
+                            port="80"
+                        fi
+                    fi
+                    
+                    show_info "Testing connectivity to $host:$port..."
+                    if test_connectivity "$host" "$port"; then
+                        show_success "✅ Server is reachable"
+                    else
+                        show_error "❌ Cannot reach server at $host:$port"
+                    fi
+                fi
+                
+                echo
+                show_info "Additional troubleshooting checks:"
+                
+                # Check tailscaled status
+                if tailscaled_running; then
+                    show_success "✅ Tailscale daemon is running"
+                else
+                    show_error "❌ Tailscale daemon is not running"
+                    if ask_yn "Start Tailscale daemon now"; then
+                        start_tailscaled
+                    fi
+                fi
+                
+                # Show current status
+                echo
+                show_info "Current Tailscale status:"
+                tailscale status 2>/dev/null || echo "Not connected or daemon not running"
+                
+                echo
+                show_info "Common solutions:"
+                echo "   • Ensure server URL includes http:// or https://"
+                echo "   • Verify pre-auth key is not expired"
+                echo "   • Check firewall rules on both client and server"
+                echo "   • Try connecting without --force-reauth first"
+                echo "   • Restart tailscaled daemon if having issues"
+                
                 pause
                 ;;
             [Bb])
